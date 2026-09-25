@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import { createClient } from '@supabase/supabase-js'
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -13,7 +14,7 @@ export type WaitlistRequest = {
 
 export type WaitlistSuccess = {
   ok: true
-  row: number
+  id: string
   timestamp: string
   email: string
 }
@@ -65,29 +66,30 @@ function validateBody(body: unknown): { ok: true; data: WaitlistRequest } | { ok
   }
 }
 
-function appendUrlSupportsBody(url: string): boolean {
-  try {
-    const u = new URL(url)
-    const host = u.hostname.toLowerCase()
-    if (host.endsWith("sheets.googleapis.com") || host.endsWith("googleapis.com")) return true
-    return false
-  } catch {
-    return false
-  }
-}
-
 export async function POST(req: Request) {
   const startedAt = new Date().toISOString()
 
   try {
-    const sheetUrl = process.env.GOOGLE_SHEET_URL
-    if (!sheetUrl || typeof sheetUrl !== "string" || sheetUrl.trim().length === 0) {
-      console.error("[waitlist] missing process.env.GOOGLE_SHEET_URL at", startedAt)
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+    if (!supabaseUrl || typeof supabaseUrl !== "string" || supabaseUrl.trim().length === 0) {
+      console.error("[waitlist] missing NEXT_PUBLIC_SUPABASE_URL at", startedAt)
       return NextResponse.json(
-        { error: "Server configuration missing: GOOGLE_SHEET_URL is not set." },
+        { error: "Server configuration missing: NEXT_PUBLIC_SUPABASE_URL is not set." },
         { status: 500 },
       )
     }
+
+    if (!supabaseKey || typeof supabaseKey !== "string" || supabaseKey.trim().length === 0) {
+      console.error("[waitlist] missing NEXT_PUBLIC_SUPABASE_ANON_KEY at", startedAt)
+      return NextResponse.json(
+        { error: "Server configuration missing: NEXT_PUBLIC_SUPABASE_ANON_KEY is not set." },
+        { status: 500 },
+      )
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey)
 
     let body: unknown
     try {
@@ -116,139 +118,58 @@ export async function POST(req: Request) {
     const ua = req.headers.get("user-agent")?.slice(0, MAX_FIELD_LEN) || undefined
     const region = "US"
 
-    const row = [
-      timestamp,
-      email,
-      name ?? "",
-      topic ?? "",
-      message ?? "",
-      source ?? "",
-      ip ?? "",
-      ua ?? "",
-      region,
-    ]
-
-    const supportsBody = appendUrlSupportsBody(sheetUrl)
-    const sheetHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-    }
-    const apiKey = process.env.GOOGLE_SHEETS_API_KEY
-    if (apiKey && typeof apiKey === "string" && apiKey.trim().length > 0) {
-      sheetHeaders["Authorization"] = `Bearer ${apiKey.trim()}`
-    }
-    const sheetToken = process.env.GOOGLE_SHEET_TOKEN || process.env.GOOGLE_APPS_SCRIPT_TOKEN
-    if (sheetToken && typeof sheetToken === "string" && sheetToken.trim().length > 0 && !sheetHeaders["Authorization"]) {
-      sheetHeaders["Authorization"] = `Bearer ${sheetToken.trim()}`
-    }
-
-    let upstream: Response
-    let sheetBody: unknown
-
-    if (supportsBody) {
-      const payload = {
-        values: [row],
-        range: "A1",
-        majorDimension: "ROWS",
-        valueInputOption: "USER_ENTERED",
-        insertDataOption: "INSERT_ROWS",
-      }
-      upstream = await fetch(sheetUrl, {
-        method: "POST",
-        headers: sheetHeaders,
-        body: JSON.stringify(payload),
+    const { data: insertData, error: insertError } = await supabase
+      .from('waitlist')
+      .insert({
+        email,
+        name: name || null,
+        topic: topic || null,
+        message: message || null,
+        source: source || null,
+        ip: ip || null,
+        user_agent: ua || null,
+        region,
+        created_at: timestamp,
       })
-      try {
-        sheetBody = await upstream.json()
-      } catch {
-        try { sheetBody = { text: (await upstream.text()).slice(0, 500) } } catch { sheetBody = null }
-      }
-    } else {
-      const queryParams = new URLSearchParams()
-      queryParams.set("timestamp", row[0])
-      queryParams.set("email", row[1])
-      if (name) queryParams.set("name", name)
-      if (topic) queryParams.set("topic", topic)
-      if (message) queryParams.set("message", message)
-      if (source) queryParams.set("source", source)
-      if (ip) queryParams.set("ip", ip)
-      if (ua) queryParams.set("ua", ua)
-      queryParams.set("region", region)
+      .select('id')
+      .single()
 
-      const separator = sheetUrl.includes("?") ? "&" : "?"
-      const finalUrl = `${sheetUrl}${separator}${queryParams.toString()}`
-
-      upstream = await fetch(finalUrl, {
-        method: "GET",
-        headers: {
-          Accept: "application/json, text/plain, */*",
-        },
-      })
-      try {
-        sheetBody = await upstream.json()
-      } catch {
-        try { sheetBody = { text: (await upstream.text()).slice(0, 500) } } catch { sheetBody = null }
-      }
-    }
-
-    if (!upstream.ok) {
-      const status = upstream.status
-      const detail =
-        sheetBody && typeof sheetBody === "object" && "error" in sheetBody
-          ? String((sheetBody as { error: unknown }).error)
-          : typeof sheetBody === "string"
-            ? sheetBody
-            : undefined
+    if (insertError) {
       console.error(
-        "[waitlist] sheet upstream non-2xx",
-        { status, email, urlHost: new URL(sheetUrl).hostname, detail, startedAt },
+        "[waitlist] supabase insert error",
+        { error: insertError.message, code: insertError.code, email, startedAt },
       )
-      if (status === 401 || status === 403) {
+      
+      // Handle unique constraint violation (duplicate email)
+      if (insertError.code === '23505') {
         return NextResponse.json(
-          { error: "Upstream sheet authorization failed. Verify GOOGLE_SHEET_URL credentials.", detail: detail || undefined },
-          { status: 502 },
+          { error: "This email is already on the waitlist." },
+          { status: 409 },
         )
       }
-      if (status === 429) {
-        return NextResponse.json(
-          { error: "Upstream sheet rate limited. Please retry in a moment.", detail: detail || undefined },
-          { status: 503 },
-        )
-      }
+
       return NextResponse.json(
-        { error: `Upstream sheet error (${status}).`, detail: detail || undefined },
-        { status: status >= 500 ? 502 : 500 },
+        { error: "Failed to add to waitlist. Please try again later.", detail: insertError.message },
+        { status: 500 },
       )
     }
 
-    let rowNumber: number | undefined
-    if (sheetBody && typeof sheetBody === "object") {
-      const bodyObj = sheetBody as Record<string, unknown>
-      if (typeof bodyObj.row === "number") rowNumber = bodyObj.row
-      else if (typeof bodyObj.rowIndex === "number") rowNumber = bodyObj.rowIndex
-      else if (
-        "updates" in bodyObj &&
-        bodyObj.updates &&
-        typeof bodyObj.updates === "object"
-      ) {
-        const up = bodyObj.updates as Record<string, unknown>
-        if (typeof up.updatedRows === "number") rowNumber = up.updatedRows
-        if (typeof up.updatedRange === "string") {
-          const match = /(\d+)$/.exec(String(up.updatedRange))
-          if (match) rowNumber = Number(match[1])
-        }
-      }
+    if (!insertData || !insertData.id) {
+      console.error("[waitlist] supabase insert returned no data", { email, startedAt })
+      return NextResponse.json(
+        { error: "Failed to add to waitlist. No data returned from database." },
+        { status: 500 },
+      )
     }
-
-    const finalRow = rowNumber ?? 1
 
     console.info(
-      "[waitlist] appended row",
-      { row: finalRow, email, source: source ?? "unspecified", topic: topic ?? "waitlist", finishedAt: new Date().toISOString() },
+      "[waitlist] successfully added to waitlist",
+      { id: insertData.id, email, source: source ?? "unspecified", topic: topic ?? "waitlist", finishedAt: new Date().toISOString() },
     )
 
     const response: WaitlistSuccess = {
       ok: true,
-      row: finalRow,
+      id: insertData.id,
       timestamp,
       email,
     }
