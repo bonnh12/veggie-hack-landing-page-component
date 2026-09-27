@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { createClient } from '@supabase/supabase-js'
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -14,7 +13,6 @@ export type WaitlistRequest = {
 
 export type WaitlistSuccess = {
   ok: true
-  id: string
   timestamp: string
   email: string
 }
@@ -70,26 +68,16 @@ export async function POST(req: Request) {
   const startedAt = new Date().toISOString()
 
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    const airtableFormUrl = process.env.NEXT_PUBLIC_AIRTABLE_FORM_URL
+    const airtableBaseId = process.env.NEXT_PUBLIC_AIRTABLE_BASE_ID
 
-    if (!supabaseUrl || typeof supabaseUrl !== "string" || supabaseUrl.trim().length === 0) {
-      console.error("[waitlist] missing NEXT_PUBLIC_SUPABASE_URL at", startedAt)
+    if (!airtableFormUrl || typeof airtableFormUrl !== "string" || airtableFormUrl.trim().length === 0) {
+      console.error("[waitlist] missing NEXT_PUBLIC_AIRTABLE_FORM_URL at", startedAt)
       return NextResponse.json(
-        { error: "Server configuration missing: NEXT_PUBLIC_SUPABASE_URL is not set." },
+        { error: "Server configuration missing: NEXT_PUBLIC_AIRTABLE_FORM_URL is not set." },
         { status: 500 },
       )
     }
-
-    if (!supabaseKey || typeof supabaseKey !== "string" || supabaseKey.trim().length === 0) {
-      console.error("[waitlist] missing NEXT_PUBLIC_SUPABASE_ANON_KEY at", startedAt)
-      return NextResponse.json(
-        { error: "Server configuration missing: NEXT_PUBLIC_SUPABASE_ANON_KEY is not set." },
-        { status: 500 },
-      )
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey)
 
     let body: unknown
     try {
@@ -118,58 +106,46 @@ export async function POST(req: Request) {
     const ua = req.headers.get("user-agent")?.slice(0, MAX_FIELD_LEN) || undefined
     const region = "US"
 
-    const { data: insertData, error: insertError } = await supabase
-      .from('waitlist')
-      .insert({
-        email,
-        name: name || null,
-        topic: topic || null,
-        message: message || null,
-        source: source || null,
-        ip: ip || null,
-        user_agent: ua || null,
-        region,
-        created_at: timestamp,
-      })
-      .select('id')
-      .single()
+    // Submit to Airtable Form
+    const formData = new URLSearchParams()
+    formData.append('email', email)
+    if (name) formData.append('name', name)
+    if (topic) formData.append('topic', topic)
+    if (message) formData.append('message', message)
+    if (source) formData.append('source', source)
+    if (ip) formData.append('ip', ip)
+    if (ua) formData.append('user_agent', ua)
+    formData.append('region', region)
+    formData.append('timestamp', timestamp)
 
-    if (insertError) {
+    const airtableResponse = await fetch(airtableFormUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
+    })
+
+    if (!airtableResponse.ok) {
+      const status = airtableResponse.status
+      const errorText = await airtableResponse.text()
       console.error(
-        "[waitlist] supabase insert error",
-        { error: insertError.message, code: insertError.code, email, startedAt },
+        "[waitlist] airtable form submission failed",
+        { status, errorText: errorText.slice(0, 500), email, startedAt },
       )
-      
-      // Handle unique constraint violation (duplicate email)
-      if (insertError.code === '23505') {
-        return NextResponse.json(
-          { error: "This email is already on the waitlist." },
-          { status: 409 },
-        )
-      }
-
       return NextResponse.json(
-        { error: "Failed to add to waitlist. Please try again later.", detail: insertError.message },
-        { status: 500 },
-      )
-    }
-
-    if (!insertData || !insertData.id) {
-      console.error("[waitlist] supabase insert returned no data", { email, startedAt })
-      return NextResponse.json(
-        { error: "Failed to add to waitlist. No data returned from database." },
-        { status: 500 },
+        { error: "Failed to submit to Airtable. Please try again later.", detail: errorText },
+        { status: 502 },
       )
     }
 
     console.info(
-      "[waitlist] successfully added to waitlist",
-      { id: insertData.id, email, source: source ?? "unspecified", topic: topic ?? "waitlist", finishedAt: new Date().toISOString() },
+      "[waitlist] successfully submitted to Airtable",
+      { email, source: source ?? "unspecified", topic: topic ?? "waitlist", finishedAt: new Date().toISOString() },
     )
 
     const response: WaitlistSuccess = {
       ok: true,
-      id: insertData.id,
       timestamp,
       email,
     }
