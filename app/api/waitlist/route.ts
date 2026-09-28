@@ -68,13 +68,12 @@ export async function POST(req: Request) {
   const startedAt = new Date().toISOString()
 
   try {
-    const airtableFormUrl = process.env.NEXT_PUBLIC_AIRTABLE_FORM_URL
-    const airtableBaseId = process.env.NEXT_PUBLIC_AIRTABLE_BASE_ID
+    const googleScriptUrl = process.env.GOOGLE_SCRIPT_URL
 
-    if (!airtableFormUrl || typeof airtableFormUrl !== "string" || airtableFormUrl.trim().length === 0) {
-      console.error("[waitlist] missing NEXT_PUBLIC_AIRTABLE_FORM_URL at", startedAt)
+    if (!googleScriptUrl || typeof googleScriptUrl !== "string" || googleScriptUrl.trim().length === 0) {
+      console.error("[waitlist] missing GOOGLE_SCRIPT_URL at", startedAt)
       return NextResponse.json(
-        { error: "Server configuration missing: NEXT_PUBLIC_AIRTABLE_FORM_URL is not set." },
+        { error: "Server configuration missing: GOOGLE_SCRIPT_URL is not set." },
         { status: 500 },
       )
     }
@@ -106,41 +105,42 @@ export async function POST(req: Request) {
     const ua = req.headers.get("user-agent")?.slice(0, MAX_FIELD_LEN) || undefined
     const region = "US"
 
-    // Submit to Airtable Form
-    const formData = new URLSearchParams()
-    formData.append('email', email)
-    if (name) formData.append('name', name)
-    if (topic) formData.append('topic', topic)
-    if (message) formData.append('message', message)
-    if (source) formData.append('source', source)
-    if (ip) formData.append('ip', ip)
-    if (ua) formData.append('user_agent', ua)
-    formData.append('region', region)
-    formData.append('timestamp', timestamp)
+    // Submit to Google Sheets Apps Script Web App
+    const scriptPayload = {
+      email,
+      name: name || "",
+      topic: topic || "",
+      message: message || "",
+      source: source || "",
+      ip: ip || "",
+      user_agent: ua || "",
+      region,
+      timestamp,
+    }
 
-    const airtableResponse = await fetch(airtableFormUrl, {
+    const scriptResponse = await fetch(googleScriptUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/json',
       },
-      body: formData.toString(),
+      body: JSON.stringify(scriptPayload),
     })
 
-    if (!airtableResponse.ok) {
-      const status = airtableResponse.status
-      const errorText = await airtableResponse.text()
+    if (!scriptResponse.ok) {
+      const status = scriptResponse.status
+      const errorText = await scriptResponse.text()
       console.error(
-        "[waitlist] airtable form submission failed",
+        "[waitlist] google script submission failed",
         { status, errorText: errorText.slice(0, 500), email, startedAt },
       )
       return NextResponse.json(
-        { error: "Failed to submit to Airtable. Please try again later.", detail: errorText },
+        { error: "Failed to submit to Google Sheets. Please try again later.", detail: errorText },
         { status: 502 },
       )
     }
 
     console.info(
-      "[waitlist] successfully submitted to Airtable",
+      "[waitlist] successfully submitted to Google Sheets",
       { email, source: source ?? "unspecified", topic: topic ?? "waitlist", finishedAt: new Date().toISOString() },
     )
 
