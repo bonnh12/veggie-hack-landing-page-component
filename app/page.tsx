@@ -37,9 +37,8 @@ export default function Page() {
       </div>
       <FoodHackStudio generatedRecipe={generatedRecipe} />
       <AdSlot slotId="veggiehack-below-studio" format="wide-horizontal" />
-      <MobileApp />
-      <AdSlot slotId="veggiehack-pre-faq" format="horizontal" />
       <FaqSection />
+      <MobileApp />
       <SiteFooter />
     </main>
   )
